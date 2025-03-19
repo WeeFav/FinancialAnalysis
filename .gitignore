@@ -1,2 +1,5 @@
 .venv
 /datasets
+.env
+/logs
+nasdaq_exteral_data.csv

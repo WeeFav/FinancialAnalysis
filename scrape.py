@@ -1,7 +1,7 @@
 from bs4 import BeautifulSoup
 import requests
 
-url = "https://finance.yahoo.com/news/nvidia-corporation-nvda-best-money-164657872.html"
+url = "https://finance.yahoo.com/news/why-netflix-stock-surging-today-151536116.html"
 header = {'Connection': 'keep-alive',
                 'Expires': '-1',
                 'Upgrade-Insecure-Requests': '1',
@@ -11,7 +11,8 @@ header = {'Connection': 'keep-alive',
 result = requests.get(url, headers=header)
 doc = BeautifulSoup(result.text, "html.parser")
 x = doc.find(class_="article yf-l7apfj")
-y = x.find_all(class_="yf-1090901")
+y = x.find_all("p", class_=["yf-1090901", "yf-1ba2ufg"])
 
 for z in y:
-  print(z.prettify())
+  print(z.text)
+  print()
