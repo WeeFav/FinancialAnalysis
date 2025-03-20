@@ -1,5 +1,6 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from datetime import datetime, timedelta
 import os
 from sec_cik_mapper import StockMapper
@@ -45,11 +46,19 @@ def extract():
     num_df = num_df.select("tag", "year", "value")
     num_df.show()
 
-    num_df.write.parquet("./fs.parquet")
+    num_df.toPandas().to_parquet("./fs.parquet")
+    
+    s3_hook = S3Hook(aws_conn_id="s3_conn")
+    s3_hook.load_file(
+        filename="./fs.parquet",
+        key="fs/fs.parquet",
+        bucket_name="financial-analysis-project-bucket",
+        replace=True
+    )   
 
 default_args = {
     'owner': 'admin',
-    'retries': 5,
+    'retries': 0,
     'retry_delay': timedelta(minutes=2)
 }
 
@@ -57,8 +66,7 @@ with DAG(
     dag_id = 'extract_fs',
     default_args=default_args,
     description='pipeline for extracting finanical statements',
-    start_date=datetime(2025, 3, 17, 2),
-    schedule_interval='@daily'
+    schedule_interval=None
 ) as dag:
     task1 = PythonOperator(
         task_id="extract",
