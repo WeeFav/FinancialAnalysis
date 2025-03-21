@@ -53,14 +53,14 @@ def extract_new_files(ti):
     num_df = num_df.filter( 
                 (num_df.tag.isin(["RevenueFromContractWithCustomerExcludingAssessedTax", "CostOfGoodsAndServicesSold", "GrossProfit", "ResearchAndDevelopmentExpense", "SellingGeneralAndAdministrativeExpense", "OperatingExpenses", "OperatingIncomeLoss", "NetIncomeLoss"]) ) &
                 # (num_df.segments.isNull()) &
-                (num_df.qtrs == 1) &
+                # (num_df.qtrs == 1) &
                 (num_df.ddate.startswith("2024")))
     # # drop irrevelant columns
-    num_df = num_df.drop("version", "qtrs", "uom", "segments", "coreg", "footnote")
+    num_df = num_df.drop("version", "ddate", "uom", "coreg", "footnote")
     # # extract revenue year
     num_df = num_df.withColumn("value", col("value") / 1000000)
                                 
-    num_df = num_df.select("adsh", "tag", "value")
+    # num_df = num_df.select("adsh", "tag", "value")
     num_df.show()
 
     num_df.toPandas().to_parquet("./fs.parquet")
@@ -75,7 +75,7 @@ def upload_to_s3():
         replace=True
     )
 
-def to_redshift():
+def copy_to_redshift():
     conn = redshift_connector.connect(
         host=os.getenv('REDSHIFT_HOST'),
         database='dev',
@@ -121,7 +121,17 @@ with DAG(
         bash_command="echo No new files"
     )
     
+    task3_upload_s3 = PythonOperator(
+        task_id="task3_upload",
+        python_callable=upload_to_s3
+    )
+    
+    task4_copy_redshift = PythonOperator(
+        task_id="task4_copy_redshift",
+        python_callable=copy_to_redshift
+    )
+    
     task1_get_files >> task_branch
     task_branch >> [task2_extract, task_exit]
-    
+    task2_extract >> task3_upload_s3 >> task4_copy_redshift
     

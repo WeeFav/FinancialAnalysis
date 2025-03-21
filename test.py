@@ -1,8 +1,4 @@
-import os
-import boto3
+import pandas as pd
 
-s3_client = boto3.client('s3')
-
-response = s3_client.list_buckets()
-for b in response['Buckets']:
-    print(b)
+df = pd.read_parquet("./fs.parquet")
+print(df.head())
