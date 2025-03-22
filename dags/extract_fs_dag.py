@@ -2,6 +2,7 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.operators.python_operator import BranchPythonOperator
 from airflow.operators.bash import BashOperator
+from airflow.utils.task_group import TaskGroup
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from datetime import datetime, timedelta
 import os
@@ -9,11 +10,16 @@ from sec_cik_mapper import StockMapper
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, substring, concat_ws, lit, quarter
 import redshift_connector
+import yfinance as yf
+import numpy as np
+from bs4 import BeautifulSoup
+import requests
+import json
 
 WATCHED_DIR = "./datasets/data"
 RECORD_FILE = "./datasets/seen_files.txt"
 
-def get_files(ti):
+def get_new_fs(ti):
     with open(RECORD_FILE, "r") as f:
         seen_files = set(f.read().splitlines())
     
@@ -27,15 +33,15 @@ def get_files(ti):
     ti.xcom_push(key='new_files', value=list(new_files))
     
 def branch(ti):
-    new_files = ti.xcom_pull(key='new_files', task_ids=['task1_get_files'])[0]
+    new_files = ti.xcom_pull(key='new_files', task_ids=['fs_pipeline.task_get_new_fs'])[0]
     print("new_files", new_files)
     if len(new_files) > 0:
-        return 'task2_extract'
+        return 'fs_pipeline.task_extract_fs'
     else:
-        return 'task_exit'
+        return 'fs_pipeline.task_exit'
 
-def extract_new_files(ti):
-    new_files = ti.xcom_pull(key='new_files', task_ids=['task1_get_files'])[0]
+def extract_fs(ti):
+    new_files = ti.xcom_pull(key='new_files', task_ids=['fs_pipeline.task_get_new_fs'])[0]
     
     sub_files = [os.path.join("./datasets/data", folder, "sub.txt") for folder in new_files]
     num_files = [os.path.join("./datasets/data", folder, "num.txt") for folder in new_files]
@@ -66,16 +72,16 @@ def extract_new_files(ti):
     num_df.toPandas().to_parquet("./fs.parquet")
     print("Saved parquet file")
 
-def upload_to_s3():
+def upload_to_s3(filename, key):
     s3_hook = S3Hook(aws_conn_id="s3_conn")
     s3_hook.load_file(
-        filename="./fs.parquet",
-        key="fs/fs.parquet",
+        filename=filename,
+        key=key,
         bucket_name="financial-analysis-project-bucket",
         replace=True
     )
 
-def copy_to_redshift():
+def copy_to_redshift(table, s3_filename):
     conn = redshift_connector.connect(
         host=os.getenv('REDSHIFT_HOST'),
         database='dev',
@@ -85,8 +91,52 @@ def copy_to_redshift():
     )
 
     cursor = conn.cursor()
-    cursor.execute("COPY dev.test.fs_test FROM 's3://financial-analysis-project-bucket/fs/fs.parquet' IAM_ROLE 'arn:aws:iam::207567756516:role/service-role/AmazonRedshift-CommandsAccessRole-20250321T104142' FORMAT AS PARQUET")
-    conn.commit()     
+    cursor.execute(f"COPY dev.test.{table} FROM 's3://financial-analysis-project-bucket/{s3_filename}' IAM_ROLE 'arn:aws:iam::207567756516:role/service-role/AmazonRedshift-CommandsAccessRole-20250321T104142' FORMAT AS PARQUET")
+    conn.commit() 
+
+def extract_stock():
+    appl = yf.Ticker("AAPL")
+    stock_price = appl.history(start="2024-01-01", end="2024-12-31", interval="1d")
+    stock_price = stock_price.drop(["Open", "High", "Low", "Dividends", "Stock Splits"], axis=1) # drop irrelevant columns
+    stock_price.index = stock_price.index.date # convert datetime index into date
+    stock_price = stock_price.reset_index() # reset index to default integer index and move existing date index into a column
+    stock_price = stock_price.rename(columns={'index':'Date'})
+    stock_price['Volume'] = stock_price['Volume'].astype(np.int32)
+    stock_price.to_parquet('./stock.parquet')
+    print("Saved parquet file")
+
+def scrape(url):
+    header = {'Connection': 'keep-alive',
+            'Expires': '-1',
+            'Upgrade-Insecure-Requests': '1',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.99 Safari/537.36'
+            }
+    
+    content = ""
+    result = requests.get(url, headers=header)
+    doc = BeautifulSoup(result.text, "html.parser")
+    article = doc.find(class_="article yf-l7apfj")
+    tags = article.find_all("p", class_=["yf-1090901", "yf-1ba2ufg"])
+
+    for tag in tags:
+        content += tag.text + "\n"
+
+    return content
+
+def extract_news():
+    news_list = yf.Search("AAPL", news_count=5).news
+
+    processed_news = []
+
+    for news in news_list:
+        news_dict = {}
+        news_dict['title'] = news['title']
+        news_dict['date'] = datetime.fromtimestamp(news['providerPublishTime']).date().strftime('%Y-%m-%d')
+        news_dict['content'] = scrape(news['link'])
+        processed_news.append(news_dict)
+
+    with open("./news.json", "w") as fp:
+        json.dump(processed_news, fp)    
 
 default_args = {
     'owner': 'admin',
@@ -95,43 +145,98 @@ default_args = {
 }
 
 with DAG(
-    dag_id = 'extract_fs_2',
+    dag_id = 'data_pipeline',
     default_args=default_args,
-    description='pipeline for extracting finanical statements',
+    description='pipeline for extracting finanical statements, stocks, and news',
     schedule_interval=None
 ) as dag:
-    task1_get_files = PythonOperator(
-        task_id="task1_get_files",
-        python_callable=get_files
-    )
+    with TaskGroup('fs_pipeline') as fs_pipeline:    
+        task_get_new_fs = PythonOperator(
+            task_id="task_get_new_fs",
+            python_callable=get_new_fs
+        )
+        
+        task_branch = BranchPythonOperator(
+            task_id='task_branch',
+            python_callable=branch,
+            dag=dag,
+        )
+        
+        task_exit = BashOperator(
+            task_id='task_exit',
+            bash_command="echo No new files"
+        )
+        
+        task_extract_fs = PythonOperator(
+            task_id="task_extract_fs",
+            python_callable=extract_fs
+        )
+        
+        task_upload_to_s3 = PythonOperator(
+            task_id="task_upload_to_s3",
+            python_callable=upload_to_s3,
+            op_kwargs={
+                "filename": "./fs.parquet",
+                "key": "fs/fs.parquet"
+            }
+        )
+        
+        task_copy_to_redshift = PythonOperator(
+            task_id="task_copy_to_redshift",
+            python_callable=copy_to_redshift,
+            op_kwargs={
+                "table": "fs_test",
+                "s3_filename": "fs/fs.parquet"
+            }
+        )
+        
+        task_get_new_fs >> task_branch
+        task_branch >> [task_extract_fs, task_exit]
+        task_extract_fs >> task_upload_to_s3 >> task_copy_to_redshift
     
-    task_branch = BranchPythonOperator(
-        task_id='task_branch',
-        python_callable=branch,
-        dag=dag,
-    )
-    
-    task2_extract = PythonOperator(
-        task_id="task2_extract",
-        python_callable=extract_new_files
-    )
-    
-    task_exit = BashOperator(
-        task_id='task_exit',
-        bash_command="echo No new files"
-    )
-    
-    task3_upload_s3 = PythonOperator(
-        task_id="task3_upload",
-        python_callable=upload_to_s3
-    )
-    
-    task4_copy_redshift = PythonOperator(
-        task_id="task4_copy_redshift",
-        python_callable=copy_to_redshift
-    )
-    
-    task1_get_files >> task_branch
-    task_branch >> [task2_extract, task_exit]
-    task2_extract >> task3_upload_s3 >> task4_copy_redshift
-    
+    with TaskGroup('stock_pipeline') as stock_pipeline:
+        task_extract_stock = PythonOperator(
+            task_id="task_extract_stock",
+            python_callable=extract_stock
+        )
+        
+        task_upload_to_s3 = PythonOperator(
+            task_id="task_upload_to_s3",
+            python_callable=upload_to_s3,
+            op_kwargs={
+                "filename": "./stock.parquet",
+                "key": "stock/stock.parquet"
+            }
+        )
+        
+        task_copy_to_redshift = PythonOperator(
+            task_id="task_copy_to_redshift",
+            python_callable=copy_to_redshift,
+            op_kwargs={
+                "table": "stock_test",
+                "s3_filename": "stock/stock.parquet"
+            }
+        )
+        
+        task_extract_stock >> task_upload_to_s3 >> task_copy_to_redshift        
+
+    with TaskGroup('news_pipeline') as news_pipeline:
+        task_extract_news = PythonOperator(
+            task_id="task_extract_news",
+            python_callable=extract_news
+        )
+        
+        task_upload_to_s3 = PythonOperator(
+            task_id="task_upload_to_s3",
+            python_callable=upload_to_s3,
+            op_kwargs={
+                "filename": "./news.json",
+                "key": "news/news.json"
+            }
+        )
+        
+        task_extract_news >> task_upload_to_s3        
+
+    fs_pipeline
+    stock_pipeline
+    news_pipeline
