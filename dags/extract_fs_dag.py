@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import os
 from sec_cik_mapper import StockMapper
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, substring, concat_ws, lit, quarter
+from pyspark.sql.functions import col, substring, concat_ws, lit, quarter, to_date, year
 import redshift_connector
 import yfinance as yf
 import numpy as np
@@ -47,6 +47,8 @@ def extract_fs(ti):
     ticker_to_cik = mapper.ticker_to_cik
     tags = ["RevenueFromContractWithCustomerExcludingAssessedTax", "CostOfGoodsAndServicesSold", "GrossProfit", "ResearchAndDevelopmentExpense", "SellingGeneralAndAdministrativeExpense", "OperatingExpenses", "OperatingIncomeLoss", "NetIncomeLoss"]
     
+    companies_cik = [int(ticker_to_cik[company]) for company in ['AAPL', 'GOOG', 'MSFT']]
+    
     spark: SparkSession = SparkSession.builder.getOrCreate() # create spark session
     
     for file in new_files:
@@ -54,16 +56,14 @@ def extract_fs(ti):
         num_file = os.path.join("./datasets/data", file, "num.txt")
             
         sub_df = spark.read.csv(sub_file, sep='\t', header=True, inferSchema=True)
-        sub_df = sub_df.filter((sub_df.cik == ticker_to_cik['AAPL']) & ((sub_df.form == "10-Q") | (sub_df.form == "10-K")))
+        sub_df = sub_df.filter((sub_df.cik.isin(companies_cik)) & (sub_df.form.isin(["10-Q", "10-K"])))
         sub_df = sub_df.drop("cik", "sic", "zipba", "bas1", "bas2", "baph", "countryma", "stprma", "cityma", "zipma", "mas1", "mas2", "countryinc", "stprinc", "ein", "former", "changed", "afs", "wksi", "filed", "accepted", "prevrpt", "detail", "instance", "nciks", "aciks")
+        sub_df = sub_df.withColumn("period", to_date("period", 'yyyyMMdd'))
         sub_df.show()
 
         num_df = spark.read.csv(num_file, sep='\t', header=True, inferSchema=True) # read financial data
-        num_df = num_df.join(sub_df, "adsh", "left_semi")
-        num_df = num_df.filter(
-            (num_df.tag.isin(tags)) &
-            (num_df.ddate.startswith("2024"))
-        )
+        num_df = num_df.withColumn("ddate", substring("ddate", 0, 4)).join(sub_df.withColumn("ddate", year("period")), ["adsh", "ddate"], "left_semi")
+        num_df = num_df.filter((num_df.tag.isin(tags)))
         num_df = num_df.drop("version", "ddate", "uom", "coreg", "footnote")
         num_df = num_df.withColumn("value", col("value") / 1000000) # convert values with unit of millions 
         num_df.show()
@@ -125,12 +125,11 @@ def fs_to_redshift(ti):
     copy_to_redshift(table_list, s3_filename_list)
 
 def extract_stock():
-    appl = yf.Ticker("AAPL")
+    appl = yf.Tickers(["AAPL", "GOOG", "MSFT"])
     stock_price = appl.history(start="2024-01-01", end="2024-12-31", interval="1d")
     stock_price = stock_price.drop(["Open", "High", "Low", "Dividends", "Stock Splits"], axis=1) # drop irrelevant columns
-    stock_price.index = stock_price.index.date # convert datetime index into date
-    stock_price = stock_price.reset_index() # reset index to default integer index and move existing date index into a column
-    stock_price = stock_price.rename(columns={'index':'Date'})
+    stock_price = stock_price.stack(level=1).reset_index()
+    stock_price['Date'] = stock_price['Date'].dt.date
     stock_price['Volume'] = stock_price['Volume'].astype(np.int32)
     stock_price.to_parquet('./stock.parquet')
     print("Saved parquet file")
@@ -205,24 +204,16 @@ with DAG(
         task_fs_to_s3 = PythonOperator(
             task_id="task_fs_to_s3",
             python_callable=fs_to_s3,
-            op_kwargs={
-                "filename": "./fs.parquet",
-                "key": "fs/fs.parquet"
-            }
         )
         
-        task_copy_to_redshift = PythonOperator(
-            task_id="task_copy_to_redshift",
-            python_callable=copy_to_redshift,
-            op_kwargs={
-                "table": "fs_test",
-                "s3_filename": "fs/fs.parquet"
-            }
+        task_fs_to_redshift = PythonOperator(
+            task_id="task_fs_to_redshift",
+            python_callable=fs_to_redshift,
         )
         
         task_get_new_fs >> task_branch
         task_branch >> [task_extract_fs, task_exit]
-        task_extract_fs >> task_fs_to_s3 >> task_copy_to_redshift
+        task_extract_fs >> task_fs_to_s3 >> task_fs_to_redshift
     
     with TaskGroup('stock_pipeline') as stock_pipeline:
         task_extract_stock = PythonOperator(
@@ -232,10 +223,10 @@ with DAG(
         
         task_upload_to_s3 = PythonOperator(
             task_id="task_upload_to_s3",
-            python_callable=fs_to_s3,
+            python_callable=upload_to_s3,
             op_kwargs={
-                "filename": "./stock.parquet",
-                "key": "stock/stock.parquet"
+                "filename_list": ["./stock.parquet"],
+                "key_list": ["stock/stock.parquet"]
             }
         )
         
@@ -243,8 +234,8 @@ with DAG(
             task_id="task_copy_to_redshift",
             python_callable=copy_to_redshift,
             op_kwargs={
-                "table": "stock_test",
-                "s3_filename": "stock/stock.parquet"
+                "table_list": ["stock"],
+                "s3_filename_list": ["stock/stock.parquet"]
             }
         )
         
@@ -258,15 +249,15 @@ with DAG(
         
         task_upload_to_s3 = PythonOperator(
             task_id="task_upload_to_s3",
-            python_callable=fs_to_s3,
+            python_callable=upload_to_s3,
             op_kwargs={
-                "filename": "./news.json",
-                "key": "news/news.json"
+                "filename_list": ["./news.json"],
+                "key_list": ["news/news.json"]
             }
         )
         
         task_extract_news >> task_upload_to_s3        
 
     fs_pipeline
-    # stock_pipeline
-    # news_pipeline
+    stock_pipeline
+    news_pipeline
