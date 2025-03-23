@@ -15,9 +15,18 @@ import numpy as np
 from bs4 import BeautifulSoup
 import requests
 import json
+import pandas as pd
 
 WATCHED_DIR = "./datasets/data"
 RECORD_FILE = "./datasets/seen_files.txt"
+
+def get_companies(ti):
+    tickers = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]['Symbol']
+    
+    tickers = ['AAPL', 'GOOG', 'MSFT']
+    
+    ti.xcom_push(key='companies', value=tickers)
+
 
 def get_new_fs(ti):
     with open(RECORD_FILE, "r") as f:
@@ -42,12 +51,13 @@ def branch(ti):
 
 def extract_fs(ti):
     new_files = ti.xcom_pull(key='new_files', task_ids=['fs_pipeline.task_get_new_fs'])[0]
+    companies = ti.xcom_pull(key='companies', task_ids=['task_get_companies'])[0]
     
     mapper = StockMapper()
     ticker_to_cik = mapper.ticker_to_cik
     tags = ["RevenueFromContractWithCustomerExcludingAssessedTax", "CostOfGoodsAndServicesSold", "GrossProfit", "ResearchAndDevelopmentExpense", "SellingGeneralAndAdministrativeExpense", "OperatingExpenses", "OperatingIncomeLoss", "NetIncomeLoss"]
     
-    companies_cik = [int(ticker_to_cik[company]) for company in ['AAPL', 'GOOG', 'MSFT']]
+    companies_cik = [int(ticker_to_cik[company]) for company in companies]
     
     spark: SparkSession = SparkSession.builder.getOrCreate() # create spark session
     
@@ -124,8 +134,9 @@ def fs_to_redshift(ti):
     
     copy_to_redshift(table_list, s3_filename_list)
 
-def extract_stock():
-    appl = yf.Tickers(["AAPL", "GOOG", "MSFT"])
+def extract_stock(ti):
+    companies = ti.xcom_pull(key='companies', task_ids=['task_get_companies'])[0]
+    appl = yf.Tickers(companies)
     stock_price = appl.history(start="2024-01-01", end="2024-12-31", interval="1d")
     stock_price = stock_price.drop(["Open", "High", "Low", "Dividends", "Stock Splits"], axis=1) # drop irrelevant columns
     stock_price = stock_price.stack(level=1).reset_index()
@@ -152,17 +163,21 @@ def scrape(url):
 
     return content
 
-def extract_news():
-    news_list = yf.Search("AAPL", news_count=5).news
-
+def extract_news(ti):
+    companies = ti.xcom_pull(key='companies', task_ids=['task_get_companies'])[0]
+    
     processed_news = []
+    
+    for company in companies:
+        news_list = yf.Search(company, news_count=5).news
 
-    for news in news_list:
-        news_dict = {}
-        news_dict['title'] = news['title']
-        news_dict['date'] = datetime.fromtimestamp(news['providerPublishTime']).date().strftime('%Y-%m-%d')
-        news_dict['content'] = scrape(news['link'])
-        processed_news.append(news_dict)
+        for news in news_list:
+            news_dict = {}
+            news_dict['ticker'] = company
+            news_dict['title'] = news['title']
+            news_dict['date'] = datetime.fromtimestamp(news['providerPublishTime']).date().strftime('%Y-%m-%d')
+            news_dict['content'] = scrape(news['link'])
+            processed_news.append(news_dict)
 
     with open("./news.json", "w") as fp:
         json.dump(processed_news, fp)    
@@ -179,6 +194,11 @@ with DAG(
     description='pipeline for extracting finanical statements, stocks, and news',
     schedule_interval=None
 ) as dag:
+    task_get_companies = PythonOperator(
+        task_id="task_get_companies",
+        python_callable=get_companies
+    )
+    
     with TaskGroup('fs_pipeline') as fs_pipeline:    
         task_get_new_fs = PythonOperator(
             task_id="task_get_new_fs",
@@ -258,6 +278,7 @@ with DAG(
         
         task_extract_news >> task_upload_to_s3        
 
-    fs_pipeline
-    stock_pipeline
-    news_pipeline
+    task_get_companies >> [fs_pipeline, stock_pipeline, news_pipeline]
+    
+    
+    

@@ -3,4 +3,4 @@
 .env
 /logs
 nasdaq_exteral_data.csv
-/dags/__pycache__
+dags/__pycache__
