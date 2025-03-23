@@ -43,45 +43,64 @@ def branch(ti):
 def extract_fs(ti):
     new_files = ti.xcom_pull(key='new_files', task_ids=['fs_pipeline.task_get_new_fs'])[0]
     
-    sub_files = [os.path.join("./datasets/data", folder, "sub.txt") for folder in new_files]
-    num_files = [os.path.join("./datasets/data", folder, "num.txt") for folder in new_files]
-    
     mapper = StockMapper()
     ticker_to_cik = mapper.ticker_to_cik
-
+    tags = ["RevenueFromContractWithCustomerExcludingAssessedTax", "CostOfGoodsAndServicesSold", "GrossProfit", "ResearchAndDevelopmentExpense", "SellingGeneralAndAdministrativeExpense", "OperatingExpenses", "OperatingIncomeLoss", "NetIncomeLoss"]
+    
     spark: SparkSession = SparkSession.builder.getOrCreate() # create spark session
-    sub_df = spark.read.csv(sub_files, sep='\t', header=True, inferSchema=True)
-    sub_df = sub_df.filter((sub_df.cik == ticker_to_cik['AAPL']) & ((sub_df.form == "10-Q") | (sub_df.form == "10-K")))
-    sub_df.show()
+    
+    for file in new_files:
+        sub_file = os.path.join("./datasets/data", file, "sub.txt")
+        num_file = os.path.join("./datasets/data", file, "num.txt")
+            
+        sub_df = spark.read.csv(sub_file, sep='\t', header=True, inferSchema=True)
+        sub_df = sub_df.filter((sub_df.cik == ticker_to_cik['AAPL']) & ((sub_df.form == "10-Q") | (sub_df.form == "10-K")))
+        sub_df = sub_df.drop("cik", "sic", "zipba", "bas1", "bas2", "baph", "countryma", "stprma", "cityma", "zipma", "mas1", "mas2", "countryinc", "stprinc", "ein", "former", "changed", "afs", "wksi", "filed", "accepted", "prevrpt", "detail", "instance", "nciks", "aciks")
+        sub_df.show()
 
-    num_df = spark.read.csv(num_files, sep='\t', header=True, inferSchema=True) # read financial data
-    num_df = num_df.join(sub_df, "adsh", "left_semi")
-    num_df = num_df.filter( 
-                (num_df.tag.isin(["RevenueFromContractWithCustomerExcludingAssessedTax", "CostOfGoodsAndServicesSold", "GrossProfit", "ResearchAndDevelopmentExpense", "SellingGeneralAndAdministrativeExpense", "OperatingExpenses", "OperatingIncomeLoss", "NetIncomeLoss"]) ) &
-                # (num_df.segments.isNull()) &
-                # (num_df.qtrs == 1) &
-                (num_df.ddate.startswith("2024")))
-    # # drop irrevelant columns
-    num_df = num_df.drop("version", "ddate", "uom", "coreg", "footnote")
-    # # extract revenue year
-    num_df = num_df.withColumn("value", col("value") / 1000000)
-                                
-    # num_df = num_df.select("adsh", "tag", "value")
-    num_df.show()
+        num_df = spark.read.csv(num_file, sep='\t', header=True, inferSchema=True) # read financial data
+        num_df = num_df.join(sub_df, "adsh", "left_semi")
+        num_df = num_df.filter(
+            (num_df.tag.isin(tags)) &
+            (num_df.ddate.startswith("2024"))
+        )
+        num_df = num_df.drop("version", "ddate", "uom", "coreg", "footnote")
+        num_df = num_df.withColumn("value", col("value") / 1000000) # convert values with unit of millions 
+        num_df.show()
+        
+        os.makedirs(f"./{file}", exist_ok=True)
 
-    num_df.toPandas().to_parquet("./fs.parquet")
-    print("Saved parquet file")
+        num_df.toPandas().to_parquet(f"./{file}/num.parquet")
+        sub_df.toPandas().to_parquet(f"./{file}/sub.parquet")
+        print(f"Saved {file} parquet file")
 
-def upload_to_s3(filename, key):
+def upload_to_s3(filename_list, key_list):
     s3_hook = S3Hook(aws_conn_id="s3_conn")
-    s3_hook.load_file(
-        filename=filename,
-        key=key,
-        bucket_name="financial-analysis-project-bucket",
-        replace=True
-    )
+    
+    for i in range(len(filename_list)):
+        s3_hook.load_file(
+            filename=filename_list[i],
+            key=key_list[i],
+            bucket_name="financial-analysis-project-bucket",
+            replace=True
+        )
 
-def copy_to_redshift(table, s3_filename):
+def fs_to_s3(ti):
+    new_files = ti.xcom_pull(key='new_files', task_ids=['fs_pipeline.task_get_new_fs'])[0]
+    
+    # upload num.parquet
+    num_filename_list = [f"./{file}/num.parquet" for file in new_files]
+    num_key_list = [f"fs/{file}/num.parquet" for file in new_files]
+    
+    # upload sub.parquet   
+    sub_filename_list = [f"./{file}/sub.parquet" for file in new_files]
+    sub_key_list = [f"fs/{file}/sub.parquet" for file in new_files]
+    
+    upload_to_s3(num_filename_list + sub_filename_list, num_key_list + sub_key_list)
+    ti.xcom_push(key='num_key_list', value=num_key_list)
+    ti.xcom_push(key='sub_key_list', value=sub_key_list)
+
+def copy_to_redshift(table_list, s3_filename_list):
     conn = redshift_connector.connect(
         host=os.getenv('REDSHIFT_HOST'),
         database='dev',
@@ -89,10 +108,21 @@ def copy_to_redshift(table, s3_filename):
         user=os.getenv('REDSHIFT_USER'),
         password=os.getenv('REDSHIFT_PASSWORD')
     )
-
+    
     cursor = conn.cursor()
-    cursor.execute(f"COPY dev.test.{table} FROM 's3://financial-analysis-project-bucket/{s3_filename}' IAM_ROLE 'arn:aws:iam::207567756516:role/service-role/AmazonRedshift-CommandsAccessRole-20250321T104142' FORMAT AS PARQUET")
+    
+    for i in range(len(table_list)):
+        cursor.execute(f"COPY dev.test.{table_list[i]} FROM 's3://financial-analysis-project-bucket/{s3_filename_list[i]}' IAM_ROLE 'arn:aws:iam::207567756516:role/service-role/AmazonRedshift-CommandsAccessRole-20250321T104142' FORMAT AS PARQUET")
+    
     conn.commit() 
+
+def fs_to_redshift(ti):
+    num_key_list = ti.xcom_pull(key='num_key_list', task_ids=['fs_pipeline.task_fs_to_s3'])[0]
+    sub_key_list = ti.xcom_pull(key='sub_key_list', task_ids=['fs_pipeline.task_fs_to_s3'])[0]
+    table_list = ['fs_num'] * len(num_key_list) + ['fs_sub'] * len(sub_key_list)
+    s3_filename_list = num_key_list + sub_key_list
+    
+    copy_to_redshift(table_list, s3_filename_list)
 
 def extract_stock():
     appl = yf.Ticker("AAPL")
@@ -172,9 +202,9 @@ with DAG(
             python_callable=extract_fs
         )
         
-        task_upload_to_s3 = PythonOperator(
-            task_id="task_upload_to_s3",
-            python_callable=upload_to_s3,
+        task_fs_to_s3 = PythonOperator(
+            task_id="task_fs_to_s3",
+            python_callable=fs_to_s3,
             op_kwargs={
                 "filename": "./fs.parquet",
                 "key": "fs/fs.parquet"
@@ -192,7 +222,7 @@ with DAG(
         
         task_get_new_fs >> task_branch
         task_branch >> [task_extract_fs, task_exit]
-        task_extract_fs >> task_upload_to_s3 >> task_copy_to_redshift
+        task_extract_fs >> task_fs_to_s3 >> task_copy_to_redshift
     
     with TaskGroup('stock_pipeline') as stock_pipeline:
         task_extract_stock = PythonOperator(
@@ -202,7 +232,7 @@ with DAG(
         
         task_upload_to_s3 = PythonOperator(
             task_id="task_upload_to_s3",
-            python_callable=upload_to_s3,
+            python_callable=fs_to_s3,
             op_kwargs={
                 "filename": "./stock.parquet",
                 "key": "stock/stock.parquet"
@@ -228,7 +258,7 @@ with DAG(
         
         task_upload_to_s3 = PythonOperator(
             task_id="task_upload_to_s3",
-            python_callable=upload_to_s3,
+            python_callable=fs_to_s3,
             op_kwargs={
                 "filename": "./news.json",
                 "key": "news/news.json"
@@ -238,5 +268,5 @@ with DAG(
         task_extract_news >> task_upload_to_s3        
 
     fs_pipeline
-    stock_pipeline
-    news_pipeline
+    # stock_pipeline
+    # news_pipeline
