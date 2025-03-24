@@ -27,7 +27,6 @@ def get_companies(ti):
     
     ti.xcom_push(key='companies', value=tickers)
 
-
 def get_new_fs(ti):
     with open(RECORD_FILE, "r") as f:
         seen_files = set(f.read().splitlines())
