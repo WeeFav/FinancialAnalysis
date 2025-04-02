@@ -4,6 +4,7 @@ from airflow.operators.python_operator import BranchPythonOperator
 from airflow.operators.bash import BashOperator
 from airflow.utils.task_group import TaskGroup
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+from airflow.hooks.base_hook import BaseHook
 from datetime import datetime, timedelta
 import os
 from sec_cik_mapper import StockMapper
@@ -16,6 +17,8 @@ from bs4 import BeautifulSoup
 import requests
 import json
 import pandas as pd
+import io
+from pyspark import SparkConf
 
 WATCHED_DIR = "./datasets/data"
 RECORD_FILE = "./datasets/seen_files.txt"
@@ -30,10 +33,17 @@ def get_companies(ti):
 def get_new_fs(ti):
     with open(RECORD_FILE, "r") as f:
         seen_files = set(f.read().splitlines())
+        
+    s3_hook = S3Hook(aws_conn_id="s3_conn")
+    response = s3_hook.get_conn().list_objects_v2(Bucket="financial-statement-datasets", Delimiter='/')
     
-    curr_files = set(os.listdir(WATCHED_DIR))
-    
-    new_files = curr_files - seen_files
+    if 'CommonPrefixes' in response:
+        curr_files = [content['Prefix'][:-1] for content in response['CommonPrefixes']]
+    else:
+        curr_files = []
+            
+    new_files = set(curr_files) - seen_files
+    new_files = set(['2024q4', '2024q3', '2024q2', '2024q1'])
     
     with open(RECORD_FILE, "w") as f:
         f.write("\n".join(curr_files))
@@ -54,27 +64,34 @@ def extract_fs(ti):
     
     mapper = StockMapper()
     ticker_to_cik = mapper.ticker_to_cik
-    tags = ["RevenueFromContractWithCustomerExcludingAssessedTax", "CostOfGoodsAndServicesSold", "GrossProfit", "ResearchAndDevelopmentExpense", "SellingGeneralAndAdministrativeExpense", "OperatingExpenses", "OperatingIncomeLoss", "NetIncomeLoss"]
+    # tags = ["RevenueFromContractWithCustomerExcludingAssessedTax", "CostOfGoodsAndServicesSold", "GrossProfit", "ResearchAndDevelopmentExpense", "SellingGeneralAndAdministrativeExpense", "OperatingExpenses", "OperatingIncomeLoss", "NetIncomeLoss"]
     
     companies_cik = [int(ticker_to_cik[company]) for company in companies]
     
-    spark: SparkSession = SparkSession.builder.getOrCreate() # create spark session
-    
+    aws_conn = BaseHook.get_connection("aws_conn")
+    conf = SparkConf()
+    conf.set("spark.jars.packages", 
+            "org.apache.hadoop:hadoop-aws:3.2.0")
+    conf.set("spark.hadoop.fs.s3a.aws.credentials.provider",
+            "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider")
+    conf.set("spark.hadoop.fs.s3a.access.key", aws_conn.login)
+    conf.set("spark.hadoop.fs.s3a.secret.key", aws_conn.password)
+    spark = SparkSession.builder.config(conf=conf).getOrCreate()
+        
     for file in new_files:
-        sub_file = os.path.join("./datasets/data", file, "sub.txt")
-        num_file = os.path.join("./datasets/data", file, "num.txt")
-            
-        sub_df = spark.read.csv(sub_file, sep='\t', header=True, inferSchema=True)
+        sub_df = spark.read.csv(f"s3a://financial-statement-datasets/{file}/sub.txt", sep='\t', header=True, inferSchema=True)
+        sub_df.cache()
         sub_df = sub_df.filter((sub_df.cik.isin(companies_cik)) & (sub_df.form.isin(["10-Q", "10-K"])))
-        sub_df = sub_df.drop("cik", "sic", "zipba", "bas1", "bas2", "baph", "countryma", "stprma", "cityma", "zipma", "mas1", "mas2", "countryinc", "stprinc", "ein", "former", "changed", "afs", "wksi", "filed", "accepted", "prevrpt", "detail", "instance", "nciks", "aciks")
+        sub_df = sub_df.drop("zipba", "bas1", "bas2", "baph", "countryma", "stprma", "cityma", "zipma", "mas1", "mas2", "ein", "former", "changed", "afs", "wksi", "filed", "accepted", "prevrpt", "detail", "instance", "nciks", "aciks")
         sub_df = sub_df.withColumn("period", to_date("period", 'yyyyMMdd'))
-        sub_df.show()
-
-        num_df = spark.read.csv(num_file, sep='\t', header=True, inferSchema=True) # read financial data
-        num_df = num_df.withColumn("ddate", substring("ddate", 0, 4)).join(sub_df.withColumn("ddate", year("period")), ["adsh", "ddate"], "left_semi")
-        num_df = num_df.filter((num_df.tag.isin(tags)))
-        num_df = num_df.drop("version", "ddate", "uom", "coreg", "footnote")
-        num_df = num_df.withColumn("value", col("value") / 1000000) # convert values with unit of millions 
+        sub_df.show()   
+        
+        num_df = spark.read.csv(f"s3a://financial-statement-datasets/{file}/num.txt", sep='\t', header=True, inferSchema=True)        
+        num_df.cache()
+        num_df = num_df.withColumn("ddate", to_date("ddate", 'yyyyMMdd'))        
+        num_df = num_df.join(sub_df, (num_df["adsh"] == sub_df["adsh"]) & (year(num_df["ddate"]) == year(sub_df["period"])), "left_semi")
+        # num_df = num_df.filter((num_df.tag.isin(tags)))
+        num_df = num_df.drop("version", "coreg", "footnote") 
         num_df.show()
         
         os.makedirs(f"./{file}", exist_ok=True)
@@ -232,7 +249,7 @@ with DAG(
         
         task_get_new_fs >> task_branch
         task_branch >> [task_extract_fs, task_exit]
-        task_extract_fs >> task_fs_to_s3 >> task_fs_to_redshift
+        # task_extract_fs >> task_fs_to_s3 >> task_fs_to_redshift
     
     with TaskGroup('stock_pipeline') as stock_pipeline:
         task_extract_stock = PythonOperator(
@@ -258,7 +275,7 @@ with DAG(
             }
         )
         
-        task_extract_stock >> task_upload_to_s3 >> task_copy_to_redshift        
+        # task_extract_stock >> task_upload_to_s3 >> task_copy_to_redshift        
 
     with TaskGroup('news_pipeline') as news_pipeline:
         task_extract_news = PythonOperator(
@@ -275,9 +292,10 @@ with DAG(
             }
         )
         
-        task_extract_news >> task_upload_to_s3        
+        # task_extract_news >> task_upload_to_s3        
 
-    task_get_companies >> [fs_pipeline, stock_pipeline, news_pipeline]
+    # task_get_companies >> [fs_pipeline, stock_pipeline, news_pipeline]
+    task_get_companies >> [fs_pipeline]
     
     
     

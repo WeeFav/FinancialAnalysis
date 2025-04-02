@@ -118,7 +118,7 @@ services:
     ports:
       - "8081:8081"
       - "7077:7077"
-
+  
   spark-worker:
     image: bitnami/spark:latest
     environment:
