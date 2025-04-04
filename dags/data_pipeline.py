@@ -19,34 +19,43 @@ import json
 import pandas as pd
 import io
 from pyspark import SparkConf
+from sqlalchemy import create_engine
+import pyarrow.parquet as pq
+import time
 
 WATCHED_DIR = "./datasets/data"
 RECORD_FILE = "./datasets/seen_files.txt"
 
 def get_companies(ti):
-    tickers = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]['Symbol']
+    tickers = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
     
-    tickers = ['AAPL', 'GOOG', 'MSFT']
+    tickers = tickers['CIK'].to_list()
+    # tickers = ['AAPL', 'GOOG', 'MSFT']
     
     ti.xcom_push(key='companies', value=tickers)
 
 def get_new_fs(ti):
-    with open(RECORD_FILE, "r") as f:
-        seen_files = set(f.read().splitlines())
+    # with open(RECORD_FILE, "r") as f:
+    #     seen_files = set(f.read().splitlines())
         
-    s3_hook = S3Hook(aws_conn_id="s3_conn")
-    response = s3_hook.get_conn().list_objects_v2(Bucket="financial-statement-datasets", Delimiter='/')
+    # s3_hook = S3Hook(aws_conn_id="s3_conn")
+    # response = s3_hook.get_conn().list_objects_v2(Bucket="financial-statement-datasets", Delimiter='/')
     
-    if 'CommonPrefixes' in response:
-        curr_files = [content['Prefix'][:-1] for content in response['CommonPrefixes']]
-    else:
-        curr_files = []
+    # if 'CommonPrefixes' in response:
+    #     curr_files = [content['Prefix'][:-1] for content in response['CommonPrefixes']]
+    # else:
+    #     curr_files = []
             
-    new_files = set(curr_files) - seen_files
-    new_files = set(['2024q4', '2024q3', '2024q2', '2024q1'])
+    # new_files = set(curr_files) - seen_files
     
-    with open(RECORD_FILE, "w") as f:
-        f.write("\n".join(curr_files))
+    # new_files = set()
+    # for year in range(2020, 2022 + 1):
+    #     for qtr in range(1, 4 + 1):
+    #         new_files.add(f'{year}q{qtr}')
+    new_files = set(['2020q1', '2020q2', '2020q3', '2021q3', '2021q4', '2022q1', '2022q4'])
+    
+    # with open(RECORD_FILE, "w") as f:
+    #     f.write("\n".join(curr_files))
     
     ti.xcom_push(key='new_files', value=list(new_files))
     
@@ -66,7 +75,9 @@ def extract_fs(ti):
     ticker_to_cik = mapper.ticker_to_cik
     # tags = ["RevenueFromContractWithCustomerExcludingAssessedTax", "CostOfGoodsAndServicesSold", "GrossProfit", "ResearchAndDevelopmentExpense", "SellingGeneralAndAdministrativeExpense", "OperatingExpenses", "OperatingIncomeLoss", "NetIncomeLoss"]
     
-    companies_cik = [int(ticker_to_cik[company]) for company in companies]
+    # companies_cik = [int(ticker_to_cik[company]) for company in companies]
+    print(len(companies))
+    companies_cik = companies
     
     aws_conn = BaseHook.get_connection("aws_conn")
     conf = SparkConf()
@@ -76,22 +87,33 @@ def extract_fs(ti):
             "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider")
     conf.set("spark.hadoop.fs.s3a.access.key", aws_conn.login)
     conf.set("spark.hadoop.fs.s3a.secret.key", aws_conn.password)
+    conf.set("spark.sql.shuffle.partitions", "200")
     spark = SparkSession.builder.config(conf=conf).getOrCreate()
         
     for file in new_files:
+        start_time = time.time()
         sub_df = spark.read.csv(f"s3a://financial-statement-datasets/{file}/sub.txt", sep='\t', header=True, inferSchema=True)
+        read_time = time.time()
+        print(start_time - read_time)
         sub_df.cache()
         sub_df = sub_df.filter((sub_df.cik.isin(companies_cik)) & (sub_df.form.isin(["10-Q", "10-K"])))
         sub_df = sub_df.drop("zipba", "bas1", "bas2", "baph", "countryma", "stprma", "cityma", "zipma", "mas1", "mas2", "ein", "former", "changed", "afs", "wksi", "filed", "accepted", "prevrpt", "detail", "instance", "nciks", "aciks")
         sub_df = sub_df.withColumn("period", to_date("period", 'yyyyMMdd'))
+        process_time = time.time()
+        print(read_time - process_time)
         sub_df.show()   
         
+        start_time = time.time()
         num_df = spark.read.csv(f"s3a://financial-statement-datasets/{file}/num.txt", sep='\t', header=True, inferSchema=True)        
+        read_time = time.time()
+        print(start_time - read_time)
         num_df.cache()
         num_df = num_df.withColumn("ddate", to_date("ddate", 'yyyyMMdd'))        
         num_df = num_df.join(sub_df, (num_df["adsh"] == sub_df["adsh"]) & (year(num_df["ddate"]) == year(sub_df["period"])), "left_semi")
         # num_df = num_df.filter((num_df.tag.isin(tags)))
         num_df = num_df.drop("version", "coreg", "footnote") 
+        process_time = time.time()
+        print(read_time - process_time)
         num_df.show()
         
         os.makedirs(f"./{file}", exist_ok=True)
@@ -141,14 +163,26 @@ def copy_to_redshift(table_list, s3_filename_list):
         cursor.execute(f"COPY dev.test.{table_list[i]} FROM 's3://financial-analysis-project-bucket/{s3_filename_list[i]}' IAM_ROLE 'arn:aws:iam::207567756516:role/service-role/AmazonRedshift-CommandsAccessRole-20250321T104142' FORMAT AS PARQUET")
     
     conn.commit() 
+    
+def copy_to_postgres(table_list, s3_filename_list):
+    s3_hook = S3Hook(aws_conn_id="s3_conn")
+    engine = create_engine('postgresql+psycopg2://airflow:airflow@postgres:5432/financial_statements')
+    
+    for i in range(len(table_list)):
+        response = s3_hook.get_conn().get_object(Bucket="financial-analysis-project-bucket", Key=s3_filename_list[i])
+        data = response['Body'].read()
+        table = pq.read_table(io.BytesIO(data))
+        df = table.to_pandas()
+        df.to_sql(f"{table_list[i]}", engine, if_exists='append', index=False)
 
-def fs_to_redshift(ti):
+def fs_to_database(ti):
     num_key_list = ti.xcom_pull(key='num_key_list', task_ids=['fs_pipeline.task_fs_to_s3'])[0]
     sub_key_list = ti.xcom_pull(key='sub_key_list', task_ids=['fs_pipeline.task_fs_to_s3'])[0]
     table_list = ['fs_num'] * len(num_key_list) + ['fs_sub'] * len(sub_key_list)
     s3_filename_list = num_key_list + sub_key_list
     
-    copy_to_redshift(table_list, s3_filename_list)
+    # copy_to_redshift(table_list, s3_filename_list)
+    copy_to_postgres(table_list, s3_filename_list)
 
 def extract_stock(ti):
     companies = ti.xcom_pull(key='companies', task_ids=['task_get_companies'])[0]
@@ -237,64 +271,65 @@ with DAG(
             python_callable=extract_fs
         )
         
-        task_fs_to_s3 = PythonOperator(
-            task_id="task_fs_to_s3",
-            python_callable=fs_to_s3,
-        )
+        # task_fs_to_s3 = PythonOperator(
+        #     task_id="task_fs_to_s3",
+        #     python_callable=fs_to_s3,
+        # )
         
-        task_fs_to_redshift = PythonOperator(
-            task_id="task_fs_to_redshift",
-            python_callable=fs_to_redshift,
-        )
+        # task_fs_to_database = PythonOperator(
+        #     task_id="task_fs_to_database",
+        #     python_callable=fs_to_database,
+        # )
         
         task_get_new_fs >> task_branch
         task_branch >> [task_extract_fs, task_exit]
-        # task_extract_fs >> task_fs_to_s3 >> task_fs_to_redshift
+        # task_extract_fs >> task_fs_to_s3 >> task_fs_to_database
+        # task_get_new_fs >> task_fs_to_s3 >> task_fs_to_database
     
-    with TaskGroup('stock_pipeline') as stock_pipeline:
-        task_extract_stock = PythonOperator(
-            task_id="task_extract_stock",
-            python_callable=extract_stock
-        )
+    # with TaskGroup('stock_pipeline') as stock_pipeline:
+    #     task_extract_stock = PythonOperator(
+    #         task_id="task_extract_stock",
+    #         python_callable=extract_stock
+    #     )
         
-        task_upload_to_s3 = PythonOperator(
-            task_id="task_upload_to_s3",
-            python_callable=upload_to_s3,
-            op_kwargs={
-                "filename_list": ["./stock.parquet"],
-                "key_list": ["stock/stock.parquet"]
-            }
-        )
+    #     task_upload_to_s3 = PythonOperator(
+    #         task_id="task_upload_to_s3",
+    #         python_callable=upload_to_s3,
+    #         op_kwargs={
+    #             "filename_list": ["./stock.parquet"],
+    #             "key_list": ["stock/stock.parquet"]
+    #         }
+    #     )
         
-        task_copy_to_redshift = PythonOperator(
-            task_id="task_copy_to_redshift",
-            python_callable=copy_to_redshift,
-            op_kwargs={
-                "table_list": ["stock"],
-                "s3_filename_list": ["stock/stock.parquet"]
-            }
-        )
+    #     task_copy_to_redshift = PythonOperator(
+    #         task_id="task_copy_to_redshift",
+    #         python_callable=copy_to_redshift,
+    #         op_kwargs={
+    #             "table_list": ["stock"],
+    #             "s3_filename_list": ["stock/stock.parquet"]
+    #         }
+    #     )
         
-        # task_extract_stock >> task_upload_to_s3 >> task_copy_to_redshift        
+    #     # task_extract_stock >> task_upload_to_s3 >> task_copy_to_redshift        
 
-    with TaskGroup('news_pipeline') as news_pipeline:
-        task_extract_news = PythonOperator(
-            task_id="task_extract_news",
-            python_callable=extract_news
-        )
+    # with TaskGroup('news_pipeline') as news_pipeline:
+    #     task_extract_news = PythonOperator(
+    #         task_id="task_extract_news",
+    #         python_callable=extract_news
+    #     )
         
-        task_upload_to_s3 = PythonOperator(
-            task_id="task_upload_to_s3",
-            python_callable=upload_to_s3,
-            op_kwargs={
-                "filename_list": ["./news.json"],
-                "key_list": ["news/news.json"]
-            }
-        )
+    #     task_upload_to_s3 = PythonOperator(
+    #         task_id="task_upload_to_s3",
+    #         python_callable=upload_to_s3,
+    #         op_kwargs={
+    #             "filename_list": ["./news.json"],
+    #             "key_list": ["news/news.json"]
+    #         }
+    #     )
         
-        # task_extract_news >> task_upload_to_s3        
+    #     # task_extract_news >> task_upload_to_s3        
 
-    # task_get_companies >> [fs_pipeline, stock_pipeline, news_pipeline]
+    # # task_get_companies >> [fs_pipeline, stock_pipeline, news_pipeline]
     task_get_companies >> [fs_pipeline]
     
     

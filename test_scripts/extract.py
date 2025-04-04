@@ -54,39 +54,39 @@ import os
 # print(stock_price["Date"].dtype)
 # stock_price.to_parquet('./stock.parquet')
 
-header = {'Connection': 'keep-alive',
-          'Expires': '-1',
-          'Upgrade-Insecure-Requests': '1',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.99 Safari/537.36'
-        }
+# header = {'Connection': 'keep-alive',
+#           'Expires': '-1',
+#           'Upgrade-Insecure-Requests': '1',
+#           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.99 Safari/537.36'
+#         }
 
-def scrape(url):
-    content = ""
-    result = requests.get(url, headers=header)
-    doc = BeautifulSoup(result.text, "html.parser")
-    article = doc.find(class_="article yf-l7apfj")
-    tags = article.find_all("p", class_=["yf-1090901", "yf-1ba2ufg"])
+# def scrape(url):
+#     content = ""
+#     result = requests.get(url, headers=header)
+#     doc = BeautifulSoup(result.text, "html.parser")
+#     article = doc.find(class_="article yf-l7apfj")
+#     tags = article.find_all("p", class_=["yf-1090901", "yf-1ba2ufg"])
 
-    for tag in tags:
-        content += tag.text + "\n"
+#     for tag in tags:
+#         content += tag.text + "\n"
 
-    return content    
+#     return content    
 
-news_list = yf.Search("NFLX", news_count=5).news
+# news_list = yf.Search("NFLX", news_count=5).news
 
-processed_news = []
+# processed_news = []
 
-for news in news_list:
-    news_dict = {}
-    news_dict['title'] = news['title']
-    news_dict['date'] = datetime.fromtimestamp(news['providerPublishTime']).date().strftime('%Y-%m-%d')
-    news_dict['content'] = scrape(news['link'])
-    processed_news.append(news_dict)
+# for news in news_list:
+#     news_dict = {}
+#     news_dict['title'] = news['title']
+#     news_dict['date'] = datetime.fromtimestamp(news['providerPublishTime']).date().strftime('%Y-%m-%d')
+#     news_dict['content'] = scrape(news['link'])
+#     processed_news.append(news_dict)
 
-with open("./news.json", "w") as fp:
-    json.dump(processed_news, fp)
+# with open("./news.json", "w") as fp:
+#     json.dump(processed_news, fp)
 
-# # get a list of S&P 500 companies
-# tickers = pd.read_html(
-#     'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
-# print(tickers)
+# get a list of S&P 500 companies
+tickers = pd.read_html(
+    'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
+print(tickers['CIK'].to_list())

@@ -3,6 +3,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import io
 from sqlalchemy import create_engine
+import time
 
 s3_client = boto3.client('s3')
 
@@ -18,22 +19,27 @@ engine = create_engine(f'postgresql+psycopg2://{user}:{password}@{host}:{port}/{
 
 folders = ['2024q2']
 
-num_key_list = [f"fs/{file}/num.parquet" for file in folders]
-sub_key_list = [f"fs/{file}/sub.parquet" for file in folders]
+num_key_list = [f"{file}/num.txt" for file in folders]
+sub_key_list = [f"{file}/sub.txt" for file in folders]
 
 for num_file in num_key_list:
-    response = s3_client.get_object(Bucket="financial-analysis-project-bucket", Key=num_file)
+    start_time = time.time()
+    response = s3_client.get_object(Bucket="financial-statement-datasets", Key=num_file)
+    read_time = time.time() - start_time
+    print(read_time)
     data = response['Body'].read()
     table = pq.read_table(io.BytesIO(data))
-    df = table.to_pandas()
-    df.head(0).to_sql('fs_num', engine, if_exists='replace', index=False) # create empty table
-    df.to_sql('fs_num', engine, if_exists='append', index=False)
+    # df = table.to_pandas()
+    # print(df.head())
+    # df.head(0).to_sql('fs_num', engine, if_exists='replace', index=False) # create empty table
+    # df.to_sql('fs_num', engine, if_exists='append', index=False)
     
-for sub_file in sub_key_list:
-    response = s3_client.get_object(Bucket="financial-analysis-project-bucket", Key=sub_file)
-    data = response['Body'].read()
-    table = pq.read_table(io.BytesIO(data))
-    df = table.to_pandas()
-    df.head(0).to_sql('fs_sub', engine, if_exists='replace', index=False) # create empty table
-    df.to_sql('fs_sub', engine, if_exists='append', index=False)
+# for sub_file in sub_key_list:
+#     response = s3_client.get_object(Bucket="financial-analysis-project-bucket", Key=sub_file)
+#     data = response['Body'].read()
+#     table = pq.read_table(io.BytesIO(data))
+#     df = table.to_pandas()
+#     print(df.head())
+#     # df.head(0).to_sql('fs_sub', engine, if_exists='replace', index=False) # create empty table
+#     # df.to_sql('fs_sub', engine, if_exists='append', index=False)
     
