@@ -47,32 +47,37 @@ def extract_fs(ti, folder):
     print(len(companies))
     companies_cik = companies
     
-    aws_conn = BaseHook.get_connection("aws_conn")
-    conf = SparkConf()
-    conf.set("spark.jars.packages", 
-            "org.apache.hadoop:hadoop-aws:3.2.0")
-    conf.set("spark.hadoop.fs.s3a.aws.credentials.provider",
-            "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider")
-    conf.set("spark.hadoop.fs.s3a.access.key", aws_conn.login)
-    conf.set("spark.hadoop.fs.s3a.secret.key", aws_conn.password)
-    conf.set("spark.sql.shuffle.partitions", "200")
-    spark = SparkSession.builder.config(conf=conf).getOrCreate()
+    # aws_conn = BaseHook.get_connection("aws_conn")
+    # conf = SparkConf()
+    # conf.set("spark.jars.packages", 
+    #         "org.apache.hadoop:hadoop-aws:3.2.0")
+    # conf.set("spark.hadoop.fs.s3a.aws.credentials.provider",
+    #         "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider")
+    # conf.set("spark.hadoop.fs.s3a.access.key", aws_conn.login)
+    # conf.set("spark.hadoop.fs.s3a.secret.key", aws_conn.password)
+    # conf.set("spark.sql.shuffle.partitions", "200")
+    # spark = SparkSession.builder.config(conf=conf).getOrCreate()
         
-    sub_df = spark.read.csv(f"s3a://financial-statement-datasets/{folder}/sub.txt", sep='\t', header=True, inferSchema=True)
-    sub_df.cache()
+    # sub_df = spark.read.csv(f"s3a://financial-statement-datasets/{folder}/sub.txt", sep='\t', header=True, inferSchema=True)
+    # sub_df.cache()
+    
+    spark = SparkSession.builder.getOrCreate()
+    sub_df = spark.read.csv(f"./datasets/data/{folder}/sub.txt", sep='\t', header=True, inferSchema=True)
     sub_df = sub_df.filter((sub_df.cik.isin(companies_cik)) & (sub_df.form.isin(["10-Q", "10-K"])))
     sub_df = sub_df.drop("zipba", "bas1", "bas2", "baph", "countryma", "stprma", "cityma", "zipma", "mas1", "mas2", "ein", "former", "changed", "afs", "wksi", "filed", "accepted", "prevrpt", "detail", "instance", "nciks", "aciks")
     sub_df = sub_df.withColumn("period", to_date("period", 'yyyyMMdd')).withColumn("folder", lit(folder))
     sub_df = sub_df.select([sub_df.columns[-1]] + sub_df.columns[:-1])
     sub_df.show()   
         
-    num_df = spark.read.csv(f"s3a://financial-statement-datasets/{folder}/num.txt", sep='\t', header=True, inferSchema=True)        
-    num_df.cache()
+    # num_df = spark.read.csv(f"s3a://financial-statement-datasets/{folder}/num.txt", sep='\t', header=True, inferSchema=True)        
+    # num_df.cache()
+    
+    num_df = spark.read.csv(f"./datasets/data/{folder}/num.txt", sep='\t', header=True, inferSchema=True)
     num_df = num_df.withColumn("ddate", to_date("ddate", 'yyyyMMdd'))        
     num_df = num_df.join(sub_df, (num_df["adsh"] == sub_df["adsh"]) & (year(num_df["ddate"]) == year(sub_df["period"])), "left_semi")
     num_df = num_df.drop("version", "coreg", "footnote") 
     num_df.show()
-        
+    
     os.makedirs(f"./{folder}", exist_ok=True)
 
     sub_df.toPandas().to_parquet(f"./{folder}/sub.parquet")
@@ -150,7 +155,7 @@ with DAG(
     description='pipeline for extracting finanical statements',
     schedule_interval=None,
     params={
-        'folder': '2024q1'
+        'folder': '2009q'
     }
 ) as dag:
     
