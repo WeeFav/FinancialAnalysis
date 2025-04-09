@@ -14,7 +14,7 @@ import os
 # mapper = StockMapper()
 # ticker_to_cik = mapper.ticker_to_cik
 # tags = ["RevenueFromContractWithCustomerExcludingAssessedTax", "CostOfGoodsAndServicesSold", "GrossProfit", "ResearchAndDevelopmentExpense", "SellingGeneralAndAdministrativeExpense", "OperatingExpenses", "OperatingIncomeLoss", "NetIncomeLoss"]
-# new_files = ["2024q1", "2024q2", "2024q3", "2024q4"]
+# new_files = ["2024q2"]
 
 # spark: SparkSession = SparkSession.builder.getOrCreate() # create spark session
 
@@ -89,4 +89,5 @@ import os
 # get a list of S&P 500 companies
 tickers = pd.read_html(
     'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
-print(tickers['CIK'].to_list())
+tickers[['Symbol', 'CIK']].to_csv('./mapping.csv', index=False)
+
