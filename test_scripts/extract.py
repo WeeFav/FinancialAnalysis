@@ -42,15 +42,21 @@ import os
     # print(f"Saved {file} parquet file")
 
 
-# appl = yf.Tickers(["AAPL", "GOOG", "MSFT"])
-# stock_price = appl.history(start="2024-01-01", end="2024-12-31", interval="1d")
-# stock_price = stock_price.drop(["Open", "High", "Low", "Dividends", "Stock Splits"], axis=1) # drop irrelevant columns
-# stock_price = stock_price.stack(level=1).reset_index()
-# stock_price["Date"] = stock_price["Date"].dt.date
-# # stock_price['Date'] = stock_price["Date"].date # convert datetime index into date
-# # stock_price = stock_price.reset_index() # reset index to default integer index and move existing date index into a column
-# # stock_price = stock_price.rename(columns={'index':'Date'})
-# stock_price['Volume'] = stock_price['Volume'].astype(np.int32)
+# get a list of S&P 500 companies
+tickers = pd.read_html(
+    'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
+tickers = tickers['Symbol'].to_list()
+
+appl = yf.Tickers(tickers)
+stock_price = appl.history(start="2009-01-01", end="2024-12-31", interval="1d")
+stock_price = stock_price.drop(["Dividends", "Stock Splits"], axis=1) # drop irrelevant columns
+stock_price = stock_price.stack(level=1).reset_index()
+stock_price["Date"] = stock_price["Date"].dt.date
+# stock_price['Date'] = stock_price["Date"].date # convert datetime index into date
+# stock_price = stock_price.reset_index() # reset index to default integer index and move existing date index into a column
+# stock_price = stock_price.rename(columns={'index':'Date'})
+stock_price['Volume'] = stock_price['Volume'].astype(np.int32)
+print(stock_price)
 # print(stock_price["Date"].dtype)
 # stock_price.to_parquet('./stock.parquet')
 
@@ -85,9 +91,4 @@ import os
 
 # with open("./news.json", "w") as fp:
 #     json.dump(processed_news, fp)
-
-# get a list of S&P 500 companies
-tickers = pd.read_html(
-    'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
-tickers[['Symbol', 'CIK']].to_csv('./mapping.csv', index=False)
 
