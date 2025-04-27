@@ -25,7 +25,7 @@ import time
 
 def get_companies(ti):
     tickers = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
-    tickers = tickers['Symbol'].to_list()
+    tickers = tickers['Symbol'].to_list() + ['^GSPC']
     ti.xcom_push(key='companies', value=tickers)
 
 def extract_stock(ti):
@@ -44,7 +44,7 @@ def upload_to_s3():
     
     s3_hook.load_file(
         filename='./stock.parquet',
-        key="fs/stock/stock.parquet",
+        key="stock/stock.parquet",
         bucket_name="financial-analysis-project-bucket",
         replace=True
     )
@@ -67,7 +67,7 @@ def copy_to_postgres():
     s3_hook = S3Hook(aws_conn_id="s3_conn")
     engine = create_engine('postgresql+psycopg2://airflow:airflow@postgres:5432/financial_statements')
     
-    response = s3_hook.get_conn().get_object(Bucket="financial-analysis-project-bucket", Key=f"fs/stock/stock.parquet")
+    response = s3_hook.get_conn().get_object(Bucket="financial-analysis-project-bucket", Key=f"stock/stock.parquet")
     data = response['Body'].read()
     table = pq.read_table(io.BytesIO(data))
     df = table.to_pandas()
@@ -108,7 +108,7 @@ with DAG(
         python_callable=copy_to_postgres,
     )
     
-    task_extract_stock >> task_upload_to_s3 >> task_copy_to_postgres      
+    task_get_companies >> task_extract_stock >> task_upload_to_s3 >> task_copy_to_postgres      
 
     
     

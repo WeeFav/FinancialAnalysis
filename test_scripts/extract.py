@@ -47,7 +47,7 @@ tickers = pd.read_html(
     'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
 tickers = tickers['Symbol'].to_list()
 
-appl = yf.Tickers(tickers)
+appl = yf.Tickers(['^GSPC'])
 stock_price = appl.history(start="2009-01-01", end="2024-12-31", interval="1d")
 stock_price = stock_price.drop(["Dividends", "Stock Splits"], axis=1) # drop irrelevant columns
 stock_price = stock_price.stack(level=1).reset_index()

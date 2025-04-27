@@ -55,23 +55,59 @@ ORDER BY curr.ddate ASC
 
 
 
+
 WITH
     cik_lookup AS (
         SELECT "CIK" FROM ticker_cik_mapping
         WHERE "Symbol" = {{Symbol}}
     ),
-	ocf AS (
+	eps AS (
 		SELECT folder, form, period, fy, fp, fs_num.adsh, tag, ddate, qtrs, uom, segments, value
 		FROM fs_num
 		JOIN fs_sub ON fs_num.adsh = fs_sub.adsh
 		WHERE
 			cik = (SELECT "CIK" FROM cik_lookup) AND
-			tag IN ('NetCashProvidedByUsedInOperatingActivities') AND
+			tag = 'CommonStockSharesOutstanding' AND
 			((fp = 'FY' AND qtrs = 4) OR (fp <> 'FY' AND qtrs = 1)) AND
 			segments ISNULL AND
 			EXTRACT(MONTH FROM period) = EXTRACT(MONTH FROM ddate)
+	),
+	eps_stock_ranked AS (
+		SELECT
+			*,
+			RANK() OVER(PARTITION BY folder ORDER BY stock."Date" DESC) AS rank_num
+		FROM eps
+		JOIN stock ON (stock."Date" <= eps.ddate) AND (stock."Date" >= DATE(eps.ddate) - INTERVAL '10 day')
+		WHERE stock."Ticker" = {{Symbol}}
 	)
 SELECT
-	*
-FROM ocf 
-ORDER BY ddate ASC
+	CONCAT(fp, ' ', fy) AS "Quater",
+	value AS "EPS",
+	eps_stock_ranked."Close" AS "Stock Price",
+	eps_stock_ranked."Close" / value AS "P/E Ratio"
+FROM eps_stock_ranked
+WHERE 
+    rank_num = 1 AND
+    fp = 
+    CASE
+        WHEN {{Quater}} = 'All' THEN fp
+        ELSE {{Quater}}
+    END
+ORDER BY ddate ASC;
+
+
+
+
+WITH 
+    cik_lookup AS (
+        SELECT "CIK" FROM ticker_cik_mapping
+        WHERE "Symbol" = 'AAPL'
+    ),
+    quater_dates AS (
+        SELECT *
+        FROM fs_sub
+        WHERE cik = (SELECT "CIK" FROM cik_lookup)
+    )
+SELECT
+    *
+FROM quater_dates

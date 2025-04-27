@@ -12,8 +12,8 @@ Run pipeline docker
 ```
   docker compose -f .\docker-compose.pipeline.yaml up -d
   docker compose -f .\docker-compose.pipeline.yaml down 
-
 ```
+
 Run dashboard docker
 ```
   docker compose -f .\docker-compose.analytics.yaml up -d
