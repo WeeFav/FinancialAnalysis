@@ -22,6 +22,7 @@ from pyspark import SparkConf
 from sqlalchemy import create_engine
 import pyarrow.parquet as pq
 import time
+from curl_cffi import requests
 
 def get_companies(ti):
     tickers = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
@@ -30,8 +31,9 @@ def get_companies(ti):
 
 def extract_stock(ti):
     companies = ti.xcom_pull(key='companies', task_ids=['task_get_companies'])[0]
-    appl = yf.Tickers(companies)
-    stock_price = appl.history(start="2009-01-01", end="2024-12-31", interval="1d")
+    session = requests.Session(impersonate="chrome")
+    tickers = yf.Tickers(companies, session=session)
+    stock_price = tickers.history(start="2009-01-01", end="2024-12-31", interval="1d")
     stock_price = stock_price.drop(["Dividends", "Stock Splits"], axis=1) # drop irrelevant columns
     stock_price = stock_price.stack(level=1).reset_index()
     stock_price["Date"] = stock_price["Date"].dt.date
@@ -49,7 +51,7 @@ def upload_to_s3():
         replace=True
     )
 
-def copy_to_redshift(folder):
+def copy_to_redshift():
     conn = redshift_connector.connect(
         host=os.getenv('REDSHIFT_HOST'),
         database='dev',
@@ -59,8 +61,7 @@ def copy_to_redshift(folder):
     )
     
     cursor = conn.cursor()
-    cursor.execute(f"COPY dev.test.fs_sub FROM 's3://financial-analysis-project-bucket/fs/{folder}/sub.parquet' IAM_ROLE 'arn:aws:iam::207567756516:role/service-role/AmazonRedshift-CommandsAccessRole-20250321T104142' FORMAT AS PARQUET")
-    cursor.execute(f"COPY dev.test.fs_num FROM 's3://financial-analysis-project-bucket/fs/{folder}/num.parquet' IAM_ROLE 'arn:aws:iam::207567756516:role/service-role/AmazonRedshift-CommandsAccessRole-20250321T104142' FORMAT AS PARQUET")
+    cursor.execute(f"COPY dev.public.stock FROM 's3://financial-analysis-project-bucket/stock/stock.parquet' IAM_ROLE 'arn:aws:iam::207567756516:role/service-role/AmazonRedshift-CommandsAccessRole-20250321T104142' FORMAT AS PARQUET")
     conn.commit() 
     
 def copy_to_postgres():
@@ -103,12 +104,17 @@ with DAG(
         python_callable=upload_to_s3,
     )
     
-    task_copy_to_postgres = PythonOperator(
-        task_id="task_copy_to_postgres",
-        python_callable=copy_to_postgres,
+    # task_copy_to_postgres = PythonOperator(
+    #     task_id="task_copy_to_postgres",
+    #     python_callable=copy_to_postgres,
+    # )
+    
+    task_copy_to_redshift = PythonOperator(
+        task_id="task_copy_to_redshift",
+        python_callable=copy_to_redshift,
     )
     
-    task_get_companies >> task_extract_stock >> task_upload_to_s3 >> task_copy_to_postgres      
+    task_get_companies >> task_extract_stock >> task_upload_to_s3 >> task_copy_to_redshift      
 
     
     

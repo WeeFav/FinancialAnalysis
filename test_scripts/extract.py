@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 import requests
 import json
 import os
-
+from curl_cffi import requests
 # mapper = StockMapper()
 # ticker_to_cik = mapper.ticker_to_cik
 # tags = ["RevenueFromContractWithCustomerExcludingAssessedTax", "CostOfGoodsAndServicesSold", "GrossProfit", "ResearchAndDevelopmentExpense", "SellingGeneralAndAdministrativeExpense", "OperatingExpenses", "OperatingIncomeLoss", "NetIncomeLoss"]
@@ -47,14 +47,12 @@ tickers = pd.read_html(
     'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
 tickers = tickers['Symbol'].to_list()
 
-appl = yf.Tickers(['^GSPC'])
+session = requests.Session(impersonate="chrome")
+appl = yf.Tickers(tickers, session=session)
 stock_price = appl.history(start="2009-01-01", end="2024-12-31", interval="1d")
 stock_price = stock_price.drop(["Dividends", "Stock Splits"], axis=1) # drop irrelevant columns
 stock_price = stock_price.stack(level=1).reset_index()
 stock_price["Date"] = stock_price["Date"].dt.date
-# stock_price['Date'] = stock_price["Date"].date # convert datetime index into date
-# stock_price = stock_price.reset_index() # reset index to default integer index and move existing date index into a column
-# stock_price = stock_price.rename(columns={'index':'Date'})
 stock_price['Volume'] = stock_price['Volume'].astype(np.int32)
 print(stock_price)
 # print(stock_price["Date"].dtype)

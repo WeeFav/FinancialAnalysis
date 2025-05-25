@@ -1,6 +1,5 @@
 .venv
-/datasets/fs_data
-/datasets/news_data
+/datasets/data
 .env
 /logs
 nasdaq_exteral_data.csv

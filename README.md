@@ -1,13 +1,21 @@
 # Financial Data Analysis | End-to-End Data Project
 
 ### Overview
-The goal of this project is to provide a simple and easy way to understand a company's performance based on its financial statements, stock prices, and news. Users can also compare different companies to identify trends across different industries. This project aims to develop a quick, intuitive understanding of a company for people who are beginners in investing.
+The goal of this project is to provide financial analysis of S&P 500 companies by analyzing their financial statements
+and forecast stock prices using historical data and daily news. The projects aims to provide a simple and easy way to 
+understand a company's financial performance using a data-driven approach.
 
 ### Data Architecture
 ![alt text](https://github.com/WeeFav/FinancialAnalysis/blob/main/github_images/pipeline.png?raw=true)
 Financial statements, including income statement, balance sheet, and cash flow, comes from the U.S. Securities and Exchange Commission (SEC). Both stock prices and market news come from Yahoo Finance. ETL is done with PySpark through Airflow automation. Data are loaded to AWS S3 and then loaded to Redshfit data warehouse, which can be queried for downstream analysis tasks.
 
-## Run 
+### Financial Statements Pipeline
+Financal statements are downloaded from [this dataset](https://www.sec.gov/data-research/sec-markets-data/financial-statement-data-sets)
+from the SEC website and are uploaded to S3. The fs_pipeline dag in airflow extract the statements from S3, transform and load to postgres for local development or Redshift for cloud development.
+You can specify which yera and which quater to extract from in airflow. 
+The sub table in the database contains metadata about quarterly and annual statements, and the num table contains all numerical data on these statements.   
+
+### Run 
 Run pipeline docker
 ```
   docker compose -f .\docker-compose.pipeline.yaml up -d
