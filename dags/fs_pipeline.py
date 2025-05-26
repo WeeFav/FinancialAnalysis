@@ -4,10 +4,10 @@ from airflow.operators.python_operator import BranchPythonOperator
 from airflow.operators.bash import BashOperator
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.hooks.base_hook import BaseHook
-from datetime import datetime, timedelta
+from datetime import timedelta
 import os
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, substring, concat_ws, lit, quarter, to_date, year
+from pyspark.sql.functions import lit, to_date, year
 import redshift_connector
 import pandas as pd
 import io
@@ -35,15 +35,20 @@ redshift_conn = redshift_connector.connect(
 )
 
 def branch1(folder, connection_type):
+    """Check if folder is already in database. If not, then continue extract job."""
+    
     if connection_type == "redshift":
         cursor = redshift_conn.cursor()
     elif connection_type == "postgres":
         cursor = postgres_conn.cursor()
   
-    cursor.execute("""
-                    SELECT * FROM recorded
-                    WHERE folder_name = %s
-                    """, folder)
+    cursor.execute(
+        """
+        SELECT * FROM recorded
+        WHERE folder_name = %s
+        """, 
+        (folder,)
+    )
             
     rows = cursor.fetchall()
         
@@ -53,25 +58,27 @@ def branch1(folder, connection_type):
         return 'task_get_companies'
 
 def branch2(connection_type):
+    """Branch to redshift or postgres"""
+    
     if connection_type == "redshift":
         return 'task_copy_to_redshift'
     elif connection_type == "postgres":
         return 'task_copy_to_postgres'
         
 def get_companies(ti):
+    """Get S&P 500 companies CIK from wikipedia"""
+    
     tickers = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
-    
     tickers = tickers['CIK'].to_list()
-    # tickers = ['AAPL', 'GOOG', 'MSFT']
-    
     ti.xcom_push(key='companies', value=tickers)
 
 def extract_fs(ti, folder):
-    companies = ti.xcom_pull(key='companies', task_ids=['task_get_companies'])[0]
+    """Extract financial statements from S3 and transform the data, then download to local"""
     
-    print(len(companies))
-    companies_cik = companies
+    companies_cik = ti.xcom_pull(key='companies', task_ids=['task_get_companies'])[0]
+    print(len(companies_cik))
     
+    # set up spark s3 hdfs so that spark can directly read from s3
     aws_conn = BaseHook.get_connection("aws_default")
     conf = SparkConf()
     conf.set("spark.jars.packages", 
@@ -84,27 +91,33 @@ def extract_fs(ti, folder):
     spark = SparkSession.builder.config(conf=conf).getOrCreate()
     
     sub_df = spark.read.csv(f"s3a://financial-statement-datasets/{folder}/sub.txt", sep='\t', header=True, inferSchema=True)
+    # cache the data so spark won't refetch again
     sub_df.cache()
+    # filter for comapnies and quaterly and annual statements
     sub_df = sub_df.filter((sub_df.cik.isin(companies_cik)) & (sub_df.form.isin(["10-Q", "10-K"])))
     sub_df = sub_df.drop("zipba", "bas1", "bas2", "baph", "countryma", "stprma", "cityma", "zipma", "mas1", "mas2", "ein", "former", "changed", "afs", "wksi", "filed", "accepted", "prevrpt", "detail", "instance", "nciks", "aciks")
+    # convert string to date and add folder column
     sub_df = sub_df.withColumn("period", to_date("period", 'yyyyMMdd')).withColumn("folder", lit(folder))
+    # reorder column position
     sub_df = sub_df.select([sub_df.columns[-1]] + sub_df.columns[:-1])
     sub_df.show()   
             
     num_df = spark.read.csv(f"s3a://financial-statement-datasets/{folder}/num.txt", sep='\t', header=True, inferSchema=True)        
     num_df.cache()
-    num_df = num_df.withColumn("ddate", to_date("ddate", 'yyyyMMdd'))        
+    num_df = num_df.withColumn("ddate", to_date("ddate", 'yyyyMMdd')) 
+    # join sub and num on matching adsh and date       
     num_df = num_df.join(sub_df, (num_df["adsh"] == sub_df["adsh"]) & (year(num_df["ddate"]) == year(sub_df["period"])), "left_semi")
     num_df = num_df.drop("version", "coreg", "footnote") 
     num_df.show()
     
+    # save parquet to local
     os.makedirs(f"./{folder}", exist_ok=True)
-
     sub_df.toPandas().to_parquet(f"./{folder}/sub.parquet")
     num_df.toPandas().to_parquet(f"./{folder}/num.parquet")
     print(f"Saved {folder}")
 
 def upload_to_s3(folder):
+    """Upload parquet to S3"""
     s3_hook = S3Hook(aws_conn_id="s3_conn")
     
     s3_hook.load_file(
@@ -121,23 +134,26 @@ def upload_to_s3(folder):
         replace=True
     )  
     
-def copy_to_redshift(folder):    
+def copy_to_redshift(folder):
+    """Load parquet to redshift database"""    
     cursor = redshift_conn.cursor()
+    
     cursor.execute(f"COPY dev.public.fs_sub FROM 's3://financial-analysis-project-bucket/fs/{folder}/sub.parquet' IAM_ROLE 'arn:aws:iam::207567756516:role/service-role/AmazonRedshift-CommandsAccessRole-20250321T104142' FORMAT AS PARQUET")
     cursor.execute(f"COPY dev.public.fs_num FROM 's3://financial-analysis-project-bucket/fs/{folder}/num.parquet' IAM_ROLE 'arn:aws:iam::207567756516:role/service-role/AmazonRedshift-CommandsAccessRole-20250321T104142' FORMAT AS PARQUET")
-    
+    # record which folders have already been loaded
     cursor.execute(
         """
         INSERT INTO recorded (folder_name)
         VALUES (%s)
-        """
-        , folder
+        """,
+        (folder,)
     )
-            
+          
     redshift_conn.commit()
-    
-    
+    print(f"Upload {folder} Success!")
+
 def copy_to_postgres(folder):
+    """Load parquet to local postgres database"""
     s3_hook = S3Hook(aws_conn_id="s3_conn")
     engine = create_engine(f"postgresql+psycopg2://{postgreshook.connection.login}:{postgreshook.connection.password}@{postgreshook.connection.host}:{postgreshook.connection.port}/{postgreshook.connection.schema}")
     
@@ -153,6 +169,7 @@ def copy_to_postgres(folder):
     df = table.to_pandas()
     df.to_sql("fs_num", engine, if_exists='append', index=False)
 
+    # record which folders have already been loaded
     with engine.connect() as connection:
         connection.execute(text(
             """

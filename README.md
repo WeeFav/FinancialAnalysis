@@ -12,8 +12,18 @@ Financial statements, including income statement, balance sheet, and cash flow, 
 ### Financial Statements Pipeline
 Financal statements are downloaded from [this dataset](https://www.sec.gov/data-research/sec-markets-data/financial-statement-data-sets)
 from the SEC website and are uploaded to S3. The fs_pipeline dag in airflow extract the statements from S3, transform and load to postgres for local development or Redshift for cloud development.
-You can specify which yera and which quater to extract from in airflow. 
+You can specify which year and which quater to extract from in airflow. 
 The sub table in the database contains metadata about quarterly and annual statements, and the num table contains all numerical data on these statements.   
+
+### Stock Pipeline
+Stocks prices of S&P 500 companies from 2009 to 2024 are extracted from yahoo finance using yfinance API, and loaded to postgres or Redshfit. 
+The table in the database contains the closing and opening price each day, as well as highest and lowest price that day and total trade volumn.
+
+### News Pipeline
+News are sourced from [here](https://huggingface.co/datasets/Zihan1004/FNSPID) and [here](https://www.kaggle.com/datasets/miguelaenlle/massive-stock-news-analysis-db-for-nlpbacktests/data), 
+which contains financial news from 2009 to 2023. The data includes the news title, stock symbol, and date. 
+
+### Future Work
 
 ### Run 
 Run pipeline docker

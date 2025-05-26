@@ -3,7 +3,6 @@ import pandas as pd
 from pyspark.sql import types
 from pyspark.sql.functions import lit, to_date
 import matplotlib.pyplot as plt
-import datetime as dt
 import numpy as np
 
 spark = SparkSession.builder \
@@ -12,9 +11,13 @@ spark = SparkSession.builder \
     .getOrCreate()
 
 def extract():
+    """Extract financial news from 2 datasets, transform it, and download to local"""
+    
+    # get S&P 500 companies symbol
     tickers = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
     tickers = tickers['Symbol'].to_list()
     
+    # define column type
     schema = types.StructType([
         types.StructField("Unnamed: 0", types.StringType(), True),
         types.StructField("Date", types.StringType(), True),
@@ -51,16 +54,18 @@ def extract():
         .select([df2.date, df2.symbol, df2.title])
     df2.show()
     
+    # concatenate both datasets
     df_all = df.union(df2)
     df_all = df.sort("symbol", "date", ascending=[True, False])
     df_all.show()
+    print(df.count(), df2.count(), df_all.count())
     
-    # print(df.count(), df2.count(), df_all.count())
-    
-    # df_all.coalesce(1).write.csv('./clean_news', mode='overwrite', header=True)
+    # save combined dataset locally
     df_all.toPandas().to_csv("./datasets/news_data/combined_clean_news.csv", index=False)
 
 def vis():
+    """Visualize news distribution from 2009 to 2024"""
+    
     schema = types.StructType([
         types.StructField("date", types.DateType(), True),
         types.StructField("symbol", types.StringType(), True),
@@ -83,7 +88,7 @@ def vis():
     plt.show()
 
 if __name__ == '__main__':
-    # extract()
+    extract()
     vis()
 
 
