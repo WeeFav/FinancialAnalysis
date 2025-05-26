@@ -27,7 +27,7 @@ Usage: run the pipeline docker compose and trigger the stock_pipeline dag. Choos
 News are sourced from [here](https://huggingface.co/datasets/Zihan1004/FNSPID) and [here](https://www.kaggle.com/datasets/miguelaenlle/massive-stock-news-analysis-db-for-nlpbacktests/data), 
 which contains financial news from 2009 to 2023. The processed data includes the news title, stock symbol, and date. 
 
-Usage: run the extract_news.py script. The proccesed, combined data will be saved locally
+Usage: run the extract_news.py script. The proccesed, combined data will be saved locally.
 
 ### Exploratory Data Analysis
 Based on the financial statements and stock price, we can conduct data analysis to analyze companies performance.
